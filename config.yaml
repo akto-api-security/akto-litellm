@@ -1,0 +1,46 @@
+model_list:
+  # Bedrock-hosted Claude, named as the model ID Claude Code asks for so no
+  # client-side model override is required.
+  - model_name: claude-sonnet-4-5-20250929
+    litellm_params:
+      model: bedrock/apac.anthropic.claude-3-7-sonnet-20250219-v1:0
+      aws_region_name: os.environ/AWS_REGION
+      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+      aws_session_token: os.environ/AWS_SESSION_TOKEN
+
+  # Same model, plain alias for curl tests.
+  - model_name: bedrock-claude
+    litellm_params:
+      model: bedrock/apac.anthropic.claude-3-7-sonnet-20250219-v1:0
+      aws_region_name: os.environ/AWS_REGION
+      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+      aws_session_token: os.environ/AWS_SESSION_TOKEN
+
+# AWS Bedrock guardrail, per LiteLLM's bedrock guardrail docs.
+# guardrail-demo v3: VIOLENCE / MISCONDUCT / HATE / SEXUAL / INSULTS at HIGH,
+# PII EMAIL + US_SOCIAL_SECURITY_NUMBER = BLOCK, PROMPT_ATTACK = NONE.
+guardrails:
+  - guardrail_name: bedrock-guard
+    litellm_params:
+      guardrail: bedrock
+      mode: pre_call
+      guardrailIdentifier: os.environ/BEDROCK_GUARDRAIL_ID
+      guardrailVersion: os.environ/BEDROCK_GUARDRAIL_VERSION
+      aws_region_name: os.environ/AWS_REGION
+      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+      aws_session_token: os.environ/AWS_SESSION_TOKEN
+      default_on: true
+
+# Exactly the block from Akto's LiteLLM connector doc.
+litellm_settings:
+  callbacks: [custom_hooks.proxy_handler_instance]
+  drop_params: true
+  set_verbose: false
+  request_timeout: 600
+  num_retries: 2
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

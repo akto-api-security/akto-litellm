@@ -1,0 +1,19 @@
+# secrets
+.env
+*.env
+!.env.example
+.aws-creds*
+
+# backups / local copies
+*.bak
+*.bak.*
+*.orig
+*.stock
+*.patched
+*.patch
+*~
+
+# runtime
+out/
+__pycache__/
+*.pyc
