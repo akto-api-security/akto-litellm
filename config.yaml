@@ -1,31 +1,12 @@
-# Claude Code -> LiteLLM -> Anthropic, with the Akto LiteLLM connector attached.
+# Claude Code -> LiteLLM -> AWS Bedrock -> Anthropic
+# with the Akto LiteLLM connector attached for guardrails + ingestion.
 #
 # Sources:
 #   litellm_settings block ....... Akto docs, "Update LiteLLM Configuration"
-#   forward_client_headers... ..... LiteLLM docs, tutorials/claude_code_max_subscription
+#   guardrails (bedrock) ......... LiteLLM docs, "Bedrock Guardrails"
 #   general_settings.master_key ... LiteLLM docs, proxy config
 
 model_list:
-  # Names match the upstream Anthropic model ids 1:1, so Claude Code's own
-  # model request passes through untouched and /model switching still works.
-  - model_name: claude-opus-5
-    litellm_params:
-      model: anthropic/claude-opus-5
-  - model_name: claude-sonnet-5
-    litellm_params:
-      model: anthropic/claude-sonnet-5
-  - model_name: claude-haiku-4-5-20251001
-    litellm_params:
-      model: anthropic/claude-haiku-4-5-20251001
-
-  # Demo backend: a local Ollama model. Lets a plain HTTP client exercise the
-  # Akto guardrail end-to-end (block AND allow paths) without needing Claude
-  # Code's OAuth header, so demos don't depend on a forwarded credential.
-  - model_name: demo-app-model
-    litellm_params:
-      model: ollama_chat/llama3.2:3b
-      api_base: http://host.docker.internal:11434
-
   # ---- AWS Bedrock (target architecture: Claude Code -> LiteLLM -> Bedrock) ----
   # ap-south-1 has no regional Anthropic capacity for current models, so these
   # use the cross-region inference profiles (global.*), invoked from ap-south-1.
@@ -75,9 +56,6 @@ guardrails:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
-  # Forwards Claude Code's own Authorization: Bearer <oauth> header upstream so
-  # the existing CLI login authenticates the model call.
-  forward_client_headers_to_llm_api: true
 
 # Exactly the block from Akto's LiteLLM connector doc.
 litellm_settings:

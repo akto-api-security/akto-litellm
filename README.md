@@ -82,9 +82,8 @@ claude
 ```
 
 > **Leave `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` unset.** `ANTHROPIC_CUSTOM_HEADERS`
-> authenticates the *gateway* hop. Setting either variable overwrites the client's
-> own `Authorization` header, which matters if you use LiteLLM's
-> `forward_client_headers_to_llm_api` to reach Anthropic directly.
+> is what authenticates the gateway hop. Setting either variable makes Claude Code
+> send an `Authorization` header that LiteLLM may try to use as its API key.
 
 ---
 
@@ -144,9 +143,22 @@ attributable to one owner:
 | Risk | Owner | Response |
 |---|---|---|
 | Toxicity (hate/violence/sexual/insults/misconduct) | **AWS Bedrock** | `400 Violated guardrail policy` |
-| PII (SSN, credit card) | **AWS Bedrock** | `400` with the triggering assessment |
+| Credit card | **AWS Bedrock** | `400` with the triggering assessment |
+| SSN | **Akto** | `403 Blocked by Akto Guardrails` |
 | Prompt injection | **Akto** | `403 Blocked by Akto Guardrails` |
+| Email address | Bedrock, masked not blocked | `200`, value anonymised upstream |
 | Benign | — | `200` |
+
+Both layers detect PII; which one reports it depends on the entity, because the
+Akto hook runs in `async_pre_call_hook` and reaches its verdict before LiteLLM's
+Bedrock guardrail for entities Akto recognises. Measured, 3 trials each:
+
+```
+email + SSN        -> AKTO
+SSN only           -> AKTO
+credit card only   -> BEDROCK
+email only         -> allowed (Bedrock ANONYMIZE masks the value)
+```
 
 The Bedrock guardrail sets **`PROMPT_ATTACK = NONE`** on purpose, so it never
 competes with Akto on injection.
@@ -307,7 +319,8 @@ session, in memory) and strips those turns before forwarding.
 case                   observed layer per run   | expectation
 benign                 allowed allowed allowed  | allowed
 toxic (hate)           BEDROCK BEDROCK BEDROCK  | BEDROCK
-PII (email+SSN)        BEDROCK BEDROCK BEDROCK  | BEDROCK
+PII (credit card)      BEDROCK BEDROCK BEDROCK  | BEDROCK
+PII (SSN)              AKTO    AKTO    AKTO     | AKTO
 prompt injection       AKTO    AKTO    AKTO     | AKTO
 ```
 
@@ -455,8 +468,8 @@ config.yaml            LiteLLM + Akto + Bedrock guardrail configuration
 docker-compose.yml     gateway + postgres
 .env.example           every setting, documented
 up.sh                  idempotent bring-up
-test-guardrails.sh     layered guardrail matrix
-claude-via-bedrock.sh  point Claude Code at the gateway (Bedrock backend)
+test-guardrails.sh     layered guardrail matrix, attributes each block by layer
+claude-via-bedrock.sh  point Claude Code at the gateway
 claude-as-agent.sh     same, via a virtual key with key_alias
 docs/claude-code-vs-litellm.md   Akto hook comparison: telemetry & control
 ```
