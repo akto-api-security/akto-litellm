@@ -192,75 +192,70 @@ newest user turn — so the two stay symmetric.
 
 ## Passing user metadata
 
-This is the mechanism the Akto hook reads to attribute traffic. **Three channels,
-all landing in LiteLLM's `metadata` dict, which the hook turns into Akto tags.**
+Identity is attached with **request headers**. LiteLLM puts them in its
+`metadata` dict and the Akto hook turns them into queryable tags.
 
-### 1. Automatic — the client's own identity
-
-Claude Code populates the Anthropic `metadata.user_id` field on every request.
-Nothing to configure:
-
-```
-client_account_uuid = 3623eb18-c6de-4621-8ea8-b8f58fb1053a
-client_device_id    = ebb0e005ed1aaffa9ecdd2fc2f22c08b0037977e15110c79b61d6ee9...
-client_session_id   = a11d32de-cdae-4e78-87cb-e578dfc19db1
-client_user_agent   = claude-cli/2.1.252 (external, claude-vscode, agent-sdk/0.3.245)
-```
-
-### 2. Virtual keys — server-side identity, no client change
+> **Status:** the header channel below is built and verified. The JWT layer from
+> the design diagram — Claude Code fetching a token via `apiKeyHelper`, LiteLLM
+> decoding it and caching the user details — is **not implemented yet**; the
+> issuer has still to be decided. Until then the claim fields are supplied
+> directly in the header, as shown.
 
 ```bash
-curl -X POST http://localhost:4000/key/generate \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "key_alias": "umesh-laptop",
-    "user_id": "umesh@akto.io",
-    "metadata": {
-      "key_type": "application",
-      "app_name": "claude-code-umesh",
-      "user_email": "umesh@akto.io",
-      "department": "engineering",
-      "employee_id": "E-1042"
-    }
-  }'
-```
-
-Every key in `metadata` becomes an Akto tag. `key_alias` / `team_alias` also
-drive the **collection name**, so each agent gets its own collection.
-
-Collection resolution order: `metadata.agent_name` → `user_api_key_metadata`
-(`app_name`, `app_slug`) when `key_type: application` → `key_alias` →
-`team_alias` → host of `LITELLM_URL`.
-
-### 3. Request headers — for JWT-derived or per-request identity
-
-```bash
-export ANTHROPIC_CUSTOM_HEADERS="x-litellm-api-key: Bearer $KEY
+export ANTHROPIC_CUSTOM_HEADERS="x-litellm-api-key: Bearer $LITELLM_MASTER_KEY
 x-litellm-end-user-id: umesh@akto.io
 x-litellm-tags: team-platform,claude-code
 x-litellm-spend-logs-metadata: {\"jwt_sub\":\"auth0|abc123\",\"seat\":\"eng-42\"}"
 ```
 
-`x-litellm-spend-logs-metadata` takes arbitrary JSON and each field is flattened
-into its own tag — this is where decoded JWT claims belong.
+`x-litellm-spend-logs-metadata` takes arbitrary JSON and each field becomes its
+own tag. That is where JWT claims will go once the decode step exists; the
+`jwt_sub` value below is a placeholder supplied by hand to prove the path.
+Header reference:
 
-### Result
+| Header | Becomes |
+|---|---|
+| `x-litellm-spend-logs-metadata` | one tag per JSON field |
+| `x-litellm-end-user-id` | `end_user_id` |
+| `x-litellm-tags` | `caller_tags` |
 
-A single Claude Code request, all three channels combined — **21 tags in Akto**:
+### What arrives in Akto
+
+A single Claude Code request, **21 tags**:
 
 ```
-app_name            = claude-code-umesh        caller_tags  = team-platform,claude-code
-client_account_uuid = 3623eb18-c6de-...        client_device_id = ebb0e005ed1aaf...
-client_session_id   = a11d32de-cdae-...        client_user_agent = claude-cli/2.1.252
-department          = engineering              employee_id  = E-1042
-end_user_id         = umesh@akto.io            jwt_sub      = auth0|abc123
-key_type            = application              model        = global.anthropic...
-seat                = eng-42                   session_id   = a11d32de-cdae-...
-trace_id            = a11d32de-cdae-...        user_email   = umesh@akto.io
-user_id             = umesh@akto.io            litellm_call_id = a12d3e07-...
-call_type           = anthropic_messages       gen-ai / litellm
+jwt_sub             = auth0|abc123            seat         = eng-42
+end_user_id         = umesh@akto.io           caller_tags  = team-platform,claude-code
+client_account_uuid = 3623eb18-c6de-...       client_device_id  = ebb0e005ed1aaf...
+client_session_id   = a11d32de-cdae-...       client_user_agent = claude-cli/2.1.252
+model               = global.anthropic...     litellm_call_id   = a12d3e07-...
+session_id / trace_id                         call_type = anthropic_messages
 ```
+
+The `client_*` tags come for free — Claude Code populates the Anthropic
+`metadata.user_id` field on every request, so account, device and session are
+attributed with no configuration at all.
+
+<details>
+<summary>Alternative: attach identity to a LiteLLM virtual key instead</summary>
+
+If you would rather hold identity server-side than send it per request, put it on
+the key. Every field in `metadata` becomes a tag, and `key_alias` / `team_alias`
+additionally drive the **collection name**, so each agent gets its own collection.
+
+```bash
+curl -X POST http://localhost:4000/key/generate \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"key_alias":"umesh-laptop","user_id":"umesh@akto.io",
+       "metadata":{"user_email":"umesh@akto.io","department":"engineering"}}'
+```
+
+Collection resolution order: `metadata.agent_name` → `user_api_key_metadata`
+(`app_name`, `app_slug`) when `key_type: application` → `key_alias` →
+`team_alias` → host of `LITELLM_URL`.
+
+</details>
 
 ### Session & trace correlation
 
@@ -452,6 +447,7 @@ so the reference setup works today.
 
 | Issue | Status |
 |---|---|
+| JWT identity layer (`apiKeyHelper` fetch, LiteLLM decode, user-detail cache) not implemented; issuer undecided | **not started** |
 | Occasional inconsistent verdicts were largely explained by fix #1 (content blocks silently ignored). Residual flakiness has been seen but not reproduced since | mostly resolved |
 | `policy_name` / `rule_violated` are empty on every Akto block; `Reason` is always `"Blocked by Akto"` — nothing is diagnosable | **open, server-side** |
 | Injection phrasing coverage not re-measured since the content-format fix; the earlier 1-of-8 figure was taken while blocks were being silently dropped and is not trustworthy | needs re-testing |
