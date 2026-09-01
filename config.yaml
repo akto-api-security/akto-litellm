@@ -1,38 +1,83 @@
+# Claude Code -> LiteLLM -> Anthropic, with the Akto LiteLLM connector attached.
+#
+# Sources:
+#   litellm_settings block ....... Akto docs, "Update LiteLLM Configuration"
+#   forward_client_headers... ..... LiteLLM docs, tutorials/claude_code_max_subscription
+#   general_settings.master_key ... LiteLLM docs, proxy config
+
 model_list:
-  # Bedrock-hosted Claude, named as the model ID Claude Code asks for so no
-  # client-side model override is required.
-  - model_name: claude-sonnet-4-5-20250929
+  # Names match the upstream Anthropic model ids 1:1, so Claude Code's own
+  # model request passes through untouched and /model switching still works.
+  - model_name: claude-opus-5
     litellm_params:
-      model: bedrock/apac.anthropic.claude-3-7-sonnet-20250219-v1:0
-      aws_region_name: os.environ/AWS_REGION
+      model: anthropic/claude-opus-5
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+
+  # Demo backend: a local Ollama model. Lets a plain HTTP client exercise the
+  # Akto guardrail end-to-end (block AND allow paths) without needing Claude
+  # Code's OAuth header, so demos don't depend on a forwarded credential.
+  - model_name: demo-app-model
+    litellm_params:
+      model: ollama_chat/llama3.2:3b
+      api_base: http://host.docker.internal:11434
+
+  # ---- AWS Bedrock (target architecture: Claude Code -> LiteLLM -> Bedrock) ----
+  # ap-south-1 has no regional Anthropic capacity for current models, so these
+  # use the cross-region inference profiles (global.*), invoked from ap-south-1.
+  # Verified with bedrock-runtime converse before wiring in.
+  - model_name: bedrock-claude-sonnet-4-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0
+      aws_region_name: os.environ/AWS_REGION_NAME
+      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+      aws_session_token: os.environ/AWS_SESSION_TOKEN
+  - model_name: bedrock-claude-haiku-4-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: os.environ/AWS_REGION_NAME
       aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
       aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
       aws_session_token: os.environ/AWS_SESSION_TOKEN
 
-  # Same model, plain alias for curl tests.
-  - model_name: bedrock-claude
-    litellm_params:
-      model: bedrock/apac.anthropic.claude-3-7-sonnet-20250219-v1:0
-      aws_region_name: os.environ/AWS_REGION
-      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
-      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
-      aws_session_token: os.environ/AWS_SESSION_TOKEN
-
-# AWS Bedrock guardrail, per LiteLLM's bedrock guardrail docs.
-# guardrail-demo v3: VIOLENCE / MISCONDUCT / HATE / SEXUAL / INSULTS at HIGH,
-# PII EMAIL + US_SOCIAL_SECURITY_NUMBER = BLOCK, PROMPT_ATTACK = NONE.
+# AWS Bedrock guardrail, per LiteLLM docs "Bedrock Guardrails".
+# Layered design: Bedrock owns toxicity + PII, Akto owns prompt injection.
+# The guardrail's PROMPT_ATTACK filter is deliberately set to NONE in AWS so the
+# two layers don't overlap and each block is attributable to one owner.
 guardrails:
-  - guardrail_name: bedrock-guard
+  - guardrail_name: bedrock-toxicity-pii
     litellm_params:
       guardrail: bedrock
       mode: pre_call
-      guardrailIdentifier: os.environ/BEDROCK_GUARDRAIL_ID
-      guardrailVersion: os.environ/BEDROCK_GUARDRAIL_VERSION
-      aws_region_name: os.environ/AWS_REGION
+      # akto-litellm-layered. Purpose-built for this flow so the shared
+      # guardrail-demo (5g8brbmgvmx1 v3) stays untouched. Difference: EMAIL is
+      # ANONYMIZE rather than BLOCK, because coding agents inject the operator's
+      # email into a <system-reminder> on every request, which made EMAIL=BLOCK
+      # reject 100% of benign Claude Code traffic. SSN and card stay BLOCK.
+      guardrailIdentifier: cq066lrgt30t
+      guardrailVersion: "1"
+      aws_region_name: os.environ/AWS_REGION_NAME
       aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
       aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
       aws_session_token: os.environ/AWS_SESSION_TOKEN
       default_on: true
+      # Without this, Bedrock evaluates the WHOLE conversation on every turn, so
+      # one PII message poisons the rest of the session - every later benign turn
+      # is re-blocked on the old SSN. Sending only the latest user turn matches
+      # what the Akto layer evaluates, so the two layers stay symmetric.
+      # Flagged experimental in LiteLLM's Bedrock guardrail docs.
+      experimental_use_latest_role_message_only: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Forwards Claude Code's own Authorization: Bearer <oauth> header upstream so
+  # the existing CLI login authenticates the model call.
+  forward_client_headers_to_llm_api: true
 
 # Exactly the block from Akto's LiteLLM connector doc.
 litellm_settings:
@@ -42,5 +87,5 @@ litellm_settings:
   request_timeout: 600
   num_retries: 2
 
-general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
+router_settings:
+  cooldown_time: 0
