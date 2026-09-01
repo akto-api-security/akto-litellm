@@ -15,26 +15,31 @@ through to **AWS Bedrock**.
 
 ```mermaid
 flowchart LR
-    CC["Claude Code<br/><i>sends identity in<br/>metadata.user_id</i>"]
-    LL["LiteLLM Gateway<br/><i>:4000</i>"]
-    AK["Akto Guardrails<br/>+ Ingestion"]
-    BR["AWS Bedrock<br/><i>ap-south-1</i>"]
-    AN["Anthropic<br/>models"]
-    MCP["MCP Tools"]
+    CC["Claude Code"]
+    LL["LiteLLM Gateway<br/>port 4000"]
+    HK["Akto hook<br/>custom_hooks.py"]
+    AK["Akto<br/>Guardrails + Ingestion"]
+    BR["AWS Bedrock<br/>ap-south-1"]
+    AN["Anthropic models"]
 
-    CC -->|"HTTPS + x-litellm-api-key"| LL
-    LL -->|"guardrail verdict<br/>+ mirrored traffic"| AK
+    CC -->|"HTTPS, x-litellm-api-key"| LL
+    LL --> HK
+    HK -->|"verdict: allow or 403"| AK
+    HK -->|"mirrored request + response"| AK
     LL -->|"SigV4"| BR
     BR --> AN
-    LL -.-> MCP
-
-    subgraph hook["Akto hook (custom_hooks.py)"]
-        H1["async_pre_call_hook<br/>verdict → 403 on block"]
-        H2["async_should_run_agentic_loop<br/>tool-call ingestion"]
-        H3["async_log_success_event<br/>request + response ingestion"]
-    end
-    LL --- hook
 ```
+
+Claude Code sends its own identity in the Anthropic `metadata.user_id` field, so
+the hook can attribute traffic without any client-side configuration.
+
+The hook attaches to LiteLLM through three callbacks:
+
+| Callback | When | Role |
+|---|---|---|
+| `async_pre_call_hook` | before the provider call | guardrail verdict; returns `403` on a block |
+| `async_should_run_agentic_loop` | after the model requests tool calls | ingests MCP / tool calls |
+| `async_log_success_event` | after the response | ingests the full request + response |
 
 Per request the gateway makes **two** guardrail-relevant calls:
 
@@ -326,7 +331,12 @@ defaults can be reverted to upstream behaviour. All of them affect **only the
 copy sent for the guardrail verdict** — ingestion always records the original
 request, so dashboard data is unchanged.
 
-### 1. Content blocks were invisible to the guardrail — the big one
+> **Fixes 1 and 2 are now upstream**, merged into `akto-api-security/akto` as
+> PR #6290 (`normalize_verdict_payload`). They are documented here because this
+> repo pinned them first; once you pull a connector build that includes #6290,
+> the fork only needs fixes 3–5.
+
+### 1. Content blocks were invisible to the guardrail — the big one  ✅ upstream
 
 Akto's guardrail reads message content only as a **plain string**. Anthropic-style
 content blocks (`content: [{"type":"text","text":"..."}]`) are not read at all.
@@ -344,7 +354,7 @@ Measured by replaying a real captured Claude Code verdict envelope, 4 trials eac
 
 Flag: `VERDICT_FLATTEN_CONTENT=true`
 
-### 2. Call metadata suppressed detection
+### 2. Call metadata suppressed detection  ✅ upstream
 
 `stream` and `tools` in the mirrored body also suppress detection. Replaying a
 real curl-derived envelope, 4 trials each: as captured → allowed 4/4; `tools`
@@ -352,21 +362,38 @@ removed → **blocked 4/4**. Neither key is content to judge.
 
 Flag: `VERDICT_DROP_BODY_KEYS=stream,tools`
 
-### 3. Agent scaffolding buried the prompt
+### 3. Verdict scoping — prevents false positives
 
 A Claude Code request is 86–120 KB, of which the user's prompt may be 63 chars.
 The verdict call is narrowed to the newest user turn and `<system-reminder>`
 harness context stripped — 120,139 B → ~150 B.
 
+This is **not** about detection failing on large payloads (fix #1 was the real
+cause of that). It is about **false positives**: the agent's own system prompt
+and scaffolding trip the policy. Measured with fix #1 in place, 4 benign Claude
+Code prompts:
+
+| | benign prompts falsely blocked |
+|---|---|
+| without verdict scoping | **1 of 4** |
+| with verdict scoping | 0 of 4 |
+
 Flags: `VALIDATE_LAST_USER_MESSAGE_ONLY=true`, `STRIP_HARNESS_CONTEXT=true`
 
-### 4. Blocked content still reached the model
+### 4. Session survival after a block
 
 When a request is rejected the client keeps the message and resends it as history
-on the next turn, so blocked content reached the model anyway. The connector
-remembers what it blocked (per session, in memory) and strips those turns before
-forwarding. Verified: after a blocked injection, asking the model to quote the
-first message returns the *following* message instead.
+on the next turn. Without handling, one of two bad things happens: the blocked
+content reaches the model as history, or the guardrail re-blocks it and every
+later turn in the session dies. The connector remembers what it blocked (per
+session, in memory) and strips those turns before forwarding, which avoids both.
+
+Measured after a blocked prompt injection:
+
+| | next benign turn | can the model quote the blocked text? |
+|---|---|---|
+| without quarantine | **403 — session dead** | n/a, everything is blocked |
+| with quarantine | allowed | **no** — it quotes the following message |
 
 Flag: `QUARANTINE_BLOCKED_HISTORY=true`
 
@@ -412,7 +439,7 @@ so the reference setup works today.
 
 | Issue | Status |
 |---|---|
-| Akto guardrail verdicts are still occasionally inconsistent for identical input, though far less so once the content-format bug above is fixed | **open, server-side** |
+| Occasional inconsistent verdicts were largely explained by fix #1 (content blocks silently ignored). Residual flakiness has been seen but not reproduced since | mostly resolved |
 | `policy_name` / `rule_violated` are empty on every Akto block; `Reason` is always `"Blocked by Akto"` — nothing is diagnosable | **open, server-side** |
 | Injection phrasing coverage not re-measured since the content-format fix; the earlier 1-of-8 figure was taken while blocks were being silently dropped and is not trustworthy | needs re-testing |
 | `SYNC_MODE=false` verdicts unreliable — that path validates and ingests in one call, so it cannot be narrowed | open |
