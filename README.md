@@ -53,17 +53,14 @@ The verdict call is deliberately narrowed (see [Guardrails with coding agents](#
 git clone https://github.com/akto-api-security/akto-litellm
 cd akto-litellm
 
-# 1. Fetch the Akto connector hook (not vendored here - always take upstream)
-curl -O https://raw.githubusercontent.com/akto-api-security/akto/master/apps/mcp-endpoint-shield/litellm/custom_hooks.py
-
-# 2. Configure
+# 1. Configure
 cp .env.example .env
 $EDITOR .env
 
-# 3. Run
+# 2. Run
 docker compose up -d
 
-# 4. Verify the hook loaded
+# 3. Verify the hook loaded
 docker compose logs litellm | grep GuardrailsHandler
 # GuardrailsHandler initialized | sync_mode=True
 ```
@@ -321,13 +318,103 @@ docker compose logs -f litellm | grep -E \
 
 ---
 
+## Patched connector
+
+`custom_hooks.py` is the upstream Akto connector **plus fixes** (+574/−20 lines,
+8 hunks; only 20 upstream lines touched). Every change is behind an env flag and
+defaults can be reverted to upstream behaviour. All of them affect **only the
+copy sent for the guardrail verdict** — ingestion always records the original
+request, so dashboard data is unchanged.
+
+### 1. Content blocks were invisible to the guardrail — the big one
+
+Akto's guardrail reads message content only as a **plain string**. Anthropic-style
+content blocks (`content: [{"type":"text","text":"..."}]`) are not read at all.
+Claude Code always sends blocks, so **prompt-injection blocking was silently
+disabled for every Claude Code request** while the service reported `Allowed: true`.
+
+Measured by replaying a real captured Claude Code verdict envelope, 4 trials each:
+
+| Verdict payload | Result |
+|---|---|
+| content as list of blocks (as captured) | allowed 4/4 |
+| same, flattened to a string | **blocked 4/4** |
+| headers reduced to minimum | allowed (not the cause) |
+| tags reduced to minimum | allowed (not the cause) |
+
+Flag: `VERDICT_FLATTEN_CONTENT=true`
+
+### 2. Call metadata suppressed detection
+
+`stream` and `tools` in the mirrored body also suppress detection. Replaying a
+real curl-derived envelope, 4 trials each: as captured → allowed 4/4; `tools`
+removed → **blocked 4/4**. Neither key is content to judge.
+
+Flag: `VERDICT_DROP_BODY_KEYS=stream,tools`
+
+### 3. Agent scaffolding buried the prompt
+
+A Claude Code request is 86–120 KB, of which the user's prompt may be 63 chars.
+The verdict call is narrowed to the newest user turn and `<system-reminder>`
+harness context stripped — 120,139 B → ~150 B.
+
+Flags: `VALIDATE_LAST_USER_MESSAGE_ONLY=true`, `STRIP_HARNESS_CONTEXT=true`
+
+### 4. Blocked content still reached the model
+
+When a request is rejected the client keeps the message and resends it as history
+on the next turn, so blocked content reached the model anyway. The connector
+remembers what it blocked (per session, in memory) and strips those turns before
+forwarding. Verified: after a blocked injection, asking the model to quote the
+first message returns the *following* message instead.
+
+Flag: `QUARANTINE_BLOCKED_HISTORY=true`
+
+### 5. Identity and trace telemetry
+
+`client_identity_tags()` surfaces the client's own identity (Claude Code account
+uuid, device id, session id, user-agent), caller tags, and
+`x-litellm-spend-logs-metadata` as Akto tags — 21 tags on a real request.
+`session_trace_headers()` emits `x-akto-installer-akto_session_id` /
+`akto_message_id`, matching the convention the other Akto connectors use.
+
+### 6. `TIMEOUT` default
+
+Raised 5 → 30. At 200 KB the guardrail call crossed 5s and the timeout was
+swallowed as a fail-open, silently dropping the event.
+
+### Verified after patching
+
+```
+Claude Code, injection x5      403 AKTO x5
+Claude Code, benign x4         all allowed
+hello then injection, x3       blocked 3/3
+injection then benign          benign works; model cannot quote the blocked turn
+curl path, injection x6        6/6 blocked
+curl path, benign x8           0/8 falsely blocked
+toxicity / PII                 Bedrock, 3/3
+```
+
+### Reverting to upstream behaviour
+
+```bash
+VERDICT_FLATTEN_CONTENT=false
+VERDICT_DROP_BODY_KEYS=
+VALIDATE_LAST_USER_MESSAGE_ONLY=false
+STRIP_HARNESS_CONTEXT=false
+QUARANTINE_BLOCKED_HISTORY=false
+```
+
+These fixes belong upstream in `akto-api-security/akto`; this repo carries them
+so the reference setup works today.
+
 ## Known issues
 
 | Issue | Status |
 |---|---|
-| Akto guardrail verdicts are not reproducible for byte-identical input | **open, server-side** |
+| Akto guardrail verdicts are still occasionally inconsistent for identical input, though far less so once the content-format bug above is fixed | **open, server-side** |
 | `policy_name` / `rule_violated` are empty on every Akto block; `Reason` is always `"Blocked by Akto"` — nothing is diagnosable | **open, server-side** |
-| Akto injection coverage is narrow (1 of 8 tested phrasings blocked) | **open, server-side** |
+| Injection phrasing coverage not re-measured since the content-format fix; the earlier 1-of-8 figure was taken while blocks were being silently dropped and is not trustworthy | needs re-testing |
 | `SYNC_MODE=false` verdicts unreliable — that path validates and ingests in one call, so it cannot be narrowed | open |
 | Quarantine state is in-memory (500 sessions × 50 turns, cleared on restart) — a multi-replica deployment needs shared state | open |
 | Akto malicious-session detection can block later benign turns in a session that contained a violation | by design; framing matters for demos |
@@ -347,9 +434,9 @@ claude-as-agent.sh     same, via a virtual key with key_alias
 docs/claude-code-vs-litellm.md   Akto hook comparison: telemetry & control
 ```
 
-`custom_hooks.py` is **not vendored** — fetch it from
-[akto-api-security/akto](https://github.com/akto-api-security/akto/tree/master/apps/mcp-endpoint-shield/litellm)
-so you always run the current connector.
+`custom_hooks.py` here is a **patched copy** of the upstream connector — see
+[Patched connector](#patched-connector). Upstream lives at
+[akto-api-security/akto](https://github.com/akto-api-security/akto/tree/master/apps/mcp-endpoint-shield/litellm).
 
 ## Further reading
 
